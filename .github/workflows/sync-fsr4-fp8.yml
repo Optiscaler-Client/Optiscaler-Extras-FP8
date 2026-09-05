@@ -1,0 +1,102 @@
+name: Sync FSR4 FP8 DLL
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get latest AMD FidelityFX-SDK release
+        id: amd
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/latest" -Headers @{ "User-Agent" = "fsr4-fp8-sync" }
+          $prebuilt = $release.assets | Where-Object { $_.name -like "*prebuilt*.zip" } | Select-Object -First 1
+          if ($prebuilt) {
+            "ASSET_URL=$($prebuilt.browser_download_url)" >> $env:GITHUB_OUTPUT
+          } else {
+            "ASSET_URL=$($release.zipball_url)" >> $env:GITHUB_OUTPUT
+          }
+          "AMD_TAG=$($release.tag_name)" >> $env:GITHUB_OUTPUT
+          "AMD_URL=$($release.html_url)" >> $env:GITHUB_OUTPUT
+
+      - name: Check our last published release
+        id: current
+        shell: pwsh
+        run: |
+          try {
+            $current = Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/releases/latest" -Headers @{ "User-Agent" = "fsr4-fp8-sync" }
+            $currentDllVer = $current.tag_name -replace '^FSR_', ''
+            $currentAmdTag = if ($current.body -match 'AMD-SDK-Tag:\s*(\S+)') { $matches[1] } else { "" }
+          } catch {
+            $currentDllVer = "0.0.0"
+            $currentAmdTag = ""
+          }
+          "CURRENT_DLL_VERSION=$currentDllVer" >> $env:GITHUB_OUTPUT
+          "CURRENT_AMD_TAG=$currentAmdTag" >> $env:GITHUB_OUTPUT
+
+      - name: Skip download if AMD hasn't published a new SDK release
+        id: gate
+        shell: pwsh
+        run: |
+          $shouldCheck = "${{ steps.amd.outputs.AMD_TAG }}" -ne "${{ steps.current.outputs.CURRENT_AMD_TAG }}"
+          "SHOULD_CHECK=$shouldCheck" >> $env:GITHUB_OUTPUT
+
+      - name: Download and extract
+        if: steps.gate.outputs.SHOULD_CHECK == 'True'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ steps.amd.outputs.ASSET_URL }}" -OutFile package.zip -Headers @{ "User-Agent" = "fsr4-fp8-sync" }
+          Expand-Archive -Path package.zip -DestinationPath extracted -Force
+
+      - name: Locate DLL and read version
+        if: steps.gate.outputs.SHOULD_CHECK == 'True'
+        id: dll
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path extracted -Recurse -Filter "amd_fidelityfx_upscaler_dx12*.dll" | Select-Object -First 1
+          if (-not $dll) { Write-Error "FSR4 FP8 DLL not found in downloaded package"; exit 1 }
+
+          $verRaw = $dll.VersionInfo.FileVersion
+          $parts = $verRaw -split '\.'
+          if ($parts.Length -ge 4 -and $parts[3] -eq '0') { $ver = ($parts[0..2] -join '.') } else { $ver = $verRaw }
+
+          "DLL_PATH=$($dll.FullName)" >> $env:GITHUB_OUTPUT
+          "DLL_NAME=$($dll.Name)" >> $env:GITHUB_OUTPUT
+          "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Compare DLL versions
+        if: steps.gate.outputs.SHOULD_CHECK == 'True'
+        id: compare
+        shell: pwsh
+        run: |
+          $new = [version]"${{ steps.dll.outputs.VERSION }}"
+          $current = [version]"${{ steps.current.outputs.CURRENT_DLL_VERSION }}"
+          "IS_NEWER=$($new -gt $current)" >> $env:GITHUB_OUTPUT
+
+      - name: Package and publish release
+        if: steps.gate.outputs.SHOULD_CHECK == 'True' && steps.compare.outputs.IS_NEWER == 'True'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = "${{ steps.dll.outputs.VERSION }}"
+          $archive = "FSR4_FP8_$ver.7z"
+
+          Copy-Item "${{ steps.dll.outputs.DLL_PATH }}" "${{ steps.dll.outputs.DLL_NAME }}" -Force
+          7z a $archive "${{ steps.dll.outputs.DLL_NAME }}"
+
+          $notes = "DLL FSR4 (FP8) obtenido automaticamente desde la fuente oficial de AMD: https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK (release ${{ steps.amd.outputs.AMD_TAG }}, ${{ steps.amd.outputs.AMD_URL }}).`n`nAMD-SDK-Tag: ${{ steps.amd.outputs.AMD_TAG }}"
+
+          gh release create "FSR_$ver" $archive `
+            --title "FSR $ver - FP8" `
+            --notes $notes
