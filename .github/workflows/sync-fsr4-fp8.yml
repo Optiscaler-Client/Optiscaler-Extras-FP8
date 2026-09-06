@@ -92,13 +92,11 @@ jobs:
           $ver = "${{ steps.dll.outputs.VERSION }}"
           $archive = "FSR4_FP8_$ver.7z"
 
-          # Normalize each to the canonical name OptiScaler/Optiscaler-Client expect, regardless of
-          # what AMD calls it in a given package (e.g. "..._new.dll" in -prebuilt zips). The upscaler
-          # keeps mapping to amdxcffx64.dll (the name already fixed for compatibility); the other
-          # FidelityFX SDK 2.0+ split-effect DLLs use their own canonical names and are only included
-          # when the package actually ships them.
+          # Normalize each to its canonical name, regardless of what AMD calls it in a given package
+          # (e.g. "..._new.dll" in -prebuilt zips). Every file is only included when the package
+          # actually ships it.
           $specs = @(
-            @{ Pattern = "amd_fidelityfx_upscaler_dx12*.dll"; OutputName = "amdxcffx64.dll" },
+            @{ Pattern = "amd_fidelityfx_upscaler_dx12*.dll"; OutputName = "amd_fidelityfx_upscaler_dx12.dll" },
             @{ Pattern = "amd_fidelityfx_radiancecache_dx12*.dll"; OutputName = "amd_fidelityfx_radiancecache_dx12.dll" },
             @{ Pattern = "amd_fidelityfx_loader_dx12*.dll"; OutputName = "amd_fidelityfx_loader_dx12.dll" },
             @{ Pattern = "amd_fidelityfx_framegeneration_dx12*.dll"; OutputName = "amd_fidelityfx_framegeneration_dx12.dll" },
